@@ -43,8 +43,14 @@ Se esta for a primeira vez que voce vai usar a gem, siga exatamente esta ordem.
 No `Gemfile` da aplicacao cliente, adicione:
 
 ```ruby
-gem "audit_logger"
+gem "audit_log_rails"
 ```
+
+Observacao importante:
+
+- o nome publicado da gem e `audit_log_rails`
+- o namespace Ruby continua sendo `AuditLogger`
+- por isso, no `Gemfile` voce instala `audit_log_rails`, mas no codigo continua usando `AuditLogger`
 
 Depois rode:
 

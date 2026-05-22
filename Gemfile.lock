@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    audit_logger (0.1.0)
+    audit_log_rails (0.1.0)
       activerecord (>= 7.0, < 9.0)
       railties (>= 7.0, < 9.0)
 
@@ -152,7 +152,7 @@ PLATFORMS
   x86_64-linux-gnu
 
 DEPENDENCIES
-  audit_logger!
+  audit_log_rails!
   irb
   minitest (~> 5.16)
   pkg-config (~> 1.6)
