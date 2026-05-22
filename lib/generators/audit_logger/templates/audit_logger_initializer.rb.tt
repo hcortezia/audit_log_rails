@@ -1,0 +1,48 @@
+# frozen_string_literal: true
+
+# Configuracao base da gem de auditoria.
+# Ajuste os resolvers conforme o contexto do projeto cliente.
+AuditLogger.configure do |config|
+  # Resolve o identificador principal do ator que executou a acao.
+  # Descomente e ajuste conforme o projeto.
+  # Exemplo:
+  # config.changed_by_id_resolver = -> { Current.user&.id }
+
+  # Resolve o tipo, perfil ou classe do ator que executou a acao.
+  # Descomente e ajuste conforme o projeto.
+  # Exemplo:
+  # config.changed_by_type_resolver = -> { Current.user&.class&.name }
+
+  # Armazena metadados extras do ator e da requisicao em JSON.
+  # Descomente e ajuste conforme o projeto.
+  # Exemplo:
+  # config.changed_by_other_resolver = lambda do
+  #   {
+  #     name: Current.user&.name,
+  #     email: Current.user&.email
+  #   }.compact
+  # end
+
+  # Permite correlacionar eventos da mesma sessao ou fluxo.
+  # Se nada for configurado aqui, a gem gera um UUID automaticamente.
+  # Exemplo:
+  # config.uuid_resolver = -> { Current.audit_uuid }
+
+  # Mantem o IP em coluna propria para facilitar consulta.
+  # Descomente e ajuste conforme o projeto.
+  # Exemplo:
+  # config.ip_resolver = -> { Current.request&.remote_ip }
+
+  # Habilita a humanizacao por padrao.
+  config.humanize_by_default = true
+
+  # Escopos padrao usados para localizar traducoes via I18n.
+  config.i18n_scopes = ["activerecord.attributes", "attributes"]
+
+  # Campos que normalmente nao agregam valor na auditoria.
+  config.ignored_attributes = [:created_at, :updated_at, :lock_version]
+
+  # Humanizer opcional.
+  # Se retornar nil, a gem usa o fallback padrao baseado em I18n.
+  config.humanizer = ->(_model_klass, _attribute, _old_value, _new_value) { nil }
+end
