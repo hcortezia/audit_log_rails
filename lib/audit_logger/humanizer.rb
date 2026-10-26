@@ -65,6 +65,8 @@ module AuditLogger
     end
 
     # Mantem o label traduzido e preserva os dados do payload bruto.
+    # Em belongs_to, acrescenta o rotulo do registro associado: "r_cargo_id: 3 -> 7" vira
+    # old_value_label "PROFESSOR" e new_value_label "ASSESSOR".
     def default_field_payload(attribute, values)
       result = { "label" => translate_attribute(attribute) }
 
@@ -72,7 +74,51 @@ module AuditLogger
         result[key] = value
       end
 
-      result
+      result.merge(association_labels(attribute, values))
+    end
+
+    VALUE_KEYS = %w[old_value new_value value].freeze
+
+    def association_labels(attribute, values)
+      return {} unless configuration.resolve_associations
+
+      reflection = belongs_to_reflection(attribute)
+      return {} unless reflection
+
+      values.each_with_object({}) do |(key, value), labels|
+        next unless VALUE_KEYS.include?(key) && !value.nil?
+
+        label = association_label(reflection, value)
+        labels["#{key}_label"] = label unless label.nil?
+      end
+    rescue StandardError => e
+      log_warning(attribute, e)
+      {}
+    end
+
+    def belongs_to_reflection(attribute)
+      record.class.reflect_on_all_associations(:belongs_to).find do |reflection|
+        !reflection.polymorphic? && reflection.foreign_key.to_s == attribute.to_s
+      end
+    end
+
+    # Procura tambem registros excluidos (soft delete): o historico precisa do nome antigo.
+    def association_label(reflection, id)
+      klass = reflection.klass
+      scope = klass.respond_to?(:with_deleted) ? klass.with_deleted : klass.unscoped
+      associated = scope.find_by(reflection.association_primary_key => id)
+      associated && display_label(associated)
+    end
+
+    LABEL_METHODS = %i[display_name descricao nome name title].freeze
+
+    # Prefere um to_s definido na propria model; depois metodos comuns de rotulo.
+    def display_label(associated)
+      owner = associated.class.instance_method(:to_s).owner
+      return associated.to_s if owner.is_a?(Class) && owner < ActiveRecord::Base
+
+      method_name = LABEL_METHODS.find { |name| associated.respond_to?(name) }
+      method_name && associated.public_send(method_name)&.to_s
     end
 
     # Faz o fallback de traducao por escopo ate encontrar um label valido.

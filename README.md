@@ -133,9 +133,19 @@ A migration inicial cria a tabela `audit_logs` com os campos:
 - `audited_changes`
 - `audited_changes_humanize`
 - `ip_remote`
+- `owner_type` e `owner_id` (registro "dono", desde a 0.2.0)
 - `created_at`
 - `updated_at`
 - `deleted_at`
+
+Quem instalou a 0.1.x cria as colunas de dono com:
+
+```bash
+bin/rails generate audit_logger:upgrade
+bin/rails db:migrate
+```
+
+Sem essas colunas a gem continua funcionando; so nao grava o dono.
 
 ## Configuracao Global Explicada
 
@@ -731,8 +741,82 @@ Se voce nao configurar nada, a gem usa:
 - `humanize_by_default = true`
 - `i18n_scopes = ["activerecord.attributes", "attributes"]`
 - `ignored_attributes = [:created_at, :updated_at, :lock_version]`
+- `masked_attributes = [:password, :password_digest, :encrypted_password, :reset_password_token, :confirmation_token, :unlock_token]`
+- `mask_value = "[FILTRADO]"`
+- `resolve_associations = true`
+- `raise_errors = false`
+- `error_handler = nil`
 
 Se `uuid_resolver` nao retornar valor, a gem gera um UUID automaticamente.
+
+## Campos Sensiveis (Mascarados)
+
+Ignorar a senha (`ignored_attributes`) faz a troca de senha sumir do historico. Mascarar registra que o campo mudou, sem os valores:
+
+```ruby
+# global (initializer)
+config.masked_attributes += [:token_api]
+
+# por model
+class User < ApplicationRecord
+  auditable masked_attributes: [:token_generate]
+end
+```
+
+No payload, `old_value` e `new_value` viram `"[FILTRADO]"`. Valor nulo continua nulo, para mostrar que o campo estava vazio.
+
+## Falhas Nao Derrubam A Requisicao
+
+O log e gravado depois do commit. Se a gravacao do log falhar, a gem registra o erro (`Rails.logger.error`), chama o `error_handler` (se houver) e segue: o dado do usuario ja foi salvo e a requisicao nao vira erro 500.
+
+```ruby
+config.error_handler = ->(error, record, action) { Sentry.capture_exception(error) }
+config.raise_errors = Rails.env.test? # nos testes, o erro sobe
+```
+
+## Historico De Um Agregado (Dono)
+
+Cada log guarda um registro "dono". Sem configuracao, o dono e o proprio registro. Para juntar o historico de varias models num registro so (ex.: a pessoa, os contratos e os dependentes dela):
+
+```ruby
+class Contrato < ApplicationRecord
+  belongs_to :pessoa
+  auditable owner: :pessoa
+end
+
+class Dependente < ApplicationRecord
+  auditable owner: ->(dependente) { dependente.contrato&.pessoa }
+end
+
+AuditLogger::AuditLog.of_owner(pessoa) # pessoa + contratos + dependentes, do mais recente ao mais antigo
+```
+
+## Rotulo De Associacoes
+
+Com `resolve_associations = true`, a troca de um `belongs_to` traz no payload humanizado o rotulo do registro associado:
+
+```json
+{ "label": "Cargo", "old_value": 3, "new_value": 7, "old_value_label": "PROFESSOR", "new_value_label": "ASSESSOR" }
+```
+
+O rotulo vem do `to_s` definido na model associada ou, na falta dele, de `display_name`, `descricao`, `nome`, `name` ou `title`. Registros com soft delete (`with_deleted`) tambem sao encontrados.
+
+## Eventos Manuais
+
+Para o que nao passa pelos callbacks (`update_all`, pedido de reset de senha, login):
+
+```ruby
+AuditLogger.record_event(
+  action: "password_reset_requested",
+  record: user,
+  fields: { encrypted_password: { old_value: "[FILTRADO]", new_value: "[FILTRADO]" } },
+  metadata: { origem: "esqueci_minha_senha" }
+)
+
+AuditLogger.record_event(action: "login_failed", model_class_name: "User", id_object: cpf, metadata: { motivo: "senha" })
+```
+
+Como no log automatico, uma falha aqui nunca sobe (a nao ser com `raise_errors`).
 
 ## Limitacoes Atuais
 

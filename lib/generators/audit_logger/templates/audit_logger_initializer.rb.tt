@@ -42,6 +42,19 @@ AuditLogger.configure do |config|
   # Campos que normalmente nao agregam valor na auditoria.
   config.ignored_attributes = [:created_at, :updated_at, :lock_version]
 
+  # Campos sensiveis: a alteracao e registrada (ex.: "senha alterada"), mas o valor vira mask_value.
+  # Acrescente tokens proprios do projeto. Por model: auditable masked_attributes: [:token]
+  config.masked_attributes = [:password, :password_digest, :encrypted_password, :reset_password_token, :confirmation_token, :unlock_token]
+  config.mask_value = "[FILTRADO]"
+
+  # Em belongs_to, grava no payload humanizado o rotulo do registro associado (old_value_label/new_value_label).
+  config.resolve_associations = true
+
+  # A auditoria roda depois do commit e nunca derruba a requisicao: falha vira log de erro.
+  # Ligue raise_errors no ambiente de teste para enxergar problemas.
+  config.raise_errors = false
+  # config.error_handler = ->(error, record, action) { Sentry.capture_exception(error) }
+
   # Humanizer opcional.
   # Se retornar nil, a gem usa o fallback padrao baseado em I18n.
   config.humanizer = ->(_model_klass, _attribute, _old_value, _new_value) { nil }

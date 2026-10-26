@@ -10,6 +10,7 @@ module AuditLogger
       uuid_resolver
       ip_resolver
       humanizer
+      error_handler
     ].freeze
 
     def self.validate!(configuration)
@@ -26,6 +27,8 @@ module AuditLogger
       validate_humanize_by_default!
       validate_i18n_scopes!
       validate_ignored_attributes!
+      validate_masked_attributes!
+      validate_booleans!
 
       configuration
     end
@@ -60,6 +63,25 @@ module AuditLogger
       unless value.is_a?(Array) && value.all? { |item| item.is_a?(String) && !item.empty? }
         raise ConfigurationError,
               "i18n_scopes deve ser um Array de strings nao vazias"
+      end
+    end
+
+    # Mesma regra dos ignorados: nomes de atributo como string ou symbol.
+    def validate_masked_attributes!
+      value = configuration.masked_attributes
+
+      unless value.is_a?(Array) && value.all? { |item| item.is_a?(String) || item.is_a?(Symbol) }
+        raise ConfigurationError,
+              "masked_attributes deve ser um Array de strings ou symbols"
+      end
+    end
+
+    # Flags simples nao aceitam valores "truthy" ambiguos.
+    def validate_booleans!
+      %i[resolve_associations raise_errors].each do |field_name|
+        next if [true, false].include?(configuration.public_send(field_name))
+
+        raise ConfigurationError, "#{field_name} deve ser true ou false"
       end
     end
 

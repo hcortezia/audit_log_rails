@@ -12,6 +12,7 @@ module AuditLogger
 
     generators do
       require_relative "../generators/audit_logger/install_generator"
+      require_relative "../generators/audit_logger/upgrade_generator"
     end
   end
 end

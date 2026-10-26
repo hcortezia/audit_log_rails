@@ -27,7 +27,21 @@ ActiveRecord::Schema.define do
       t.text :audited_changes
       t.text :audited_changes_humanize
       t.string :ip_remote
+      t.string :owner_type
+      t.string :owner_id
       t.datetime :deleted_at
+      t.timestamps null: false
+    end
+
+    create_table :authors, force: true do |t|
+      t.string :nome
+      t.string :encrypted_password
+      t.timestamps null: false
+    end
+
+    create_table :documents, force: true do |t|
+      t.string :title
+      t.references :author
       t.timestamps null: false
     end
 
@@ -79,11 +93,28 @@ class CustomSampleRecord < ActiveRecord::Base
             i18n_scopes: ["school", "activerecord.attributes"]
 end
 
+# Autor com senha (mascarada) e documento que agrupa o historico no autor.
+class Author < ActiveRecord::Base
+  include AuditLogger::Auditable
+
+  auditable
+end
+
+class Document < ActiveRecord::Base
+  include AuditLogger::Auditable
+
+  belongs_to :author, optional: true
+
+  auditable owner: :author
+end
+
 class Minitest::Test
   def setup
     # Limpa os dados entre testes para evitar acoplamento entre cenarios.
     AuditLogger::AuditLog.delete_all
     SampleRecord.delete_all
+    Document.delete_all
+    Author.delete_all
     AuditLogger.reset_configuration!
     I18n.locale = :en
   end
