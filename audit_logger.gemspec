@@ -5,8 +5,8 @@ require_relative "lib/audit_logger/version"
 Gem::Specification.new do |spec|
   spec.name = "audit_log_rails"
   spec.version = AuditLogger::VERSION
-  spec.authors = ["DHC soluções"]
-  spec.email = ["dhcsolucoesinformatica@gmail.com"]
+  spec.authors = ["hcortezia"]
+  spec.email = ["humbertocortezia+github@gmail.com"]
 
   spec.summary = "Auditoria de models ActiveRecord: quem alterou, quando, valor antigo e novo."
   spec.description = "Registra create, update e destroy em tabela própria (audit_logs), com payload bruto e humanizado " \
