@@ -8,8 +8,10 @@ Gem::Specification.new do |spec|
   spec.authors = ["DHC soluções"]
   spec.email = ["dhcsolucoesinformatica@gmail.com"]
 
-  spec.summary = "Gem Rails para auditoria de models ActiveRecord"
-  spec.description = "AuditLogger registra eventos de create, update e destroy em tabela propria, com payload bruto, payload humanizado e configuracao flexivel por initializer."
+  spec.summary = "Auditoria de models ActiveRecord: quem alterou, quando, valor antigo e novo."
+  spec.description = "Registra create, update e destroy em tabela própria (audit_logs), com payload bruto e humanizado " \
+                     "via I18n, campos sensíveis mascarados, rótulo de associações, histórico agrupado por registro " \
+                     "dono, eventos manuais e gravação que nunca derruba a requisição."
   spec.homepage = "https://github.com/hcortezia/audit_log_rails"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1.0"

@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-## [0.2.0]
+## [0.2.0] - 2026-10-26
 
 - `masked_attributes` (global e por model) e `mask_value`: a alteracao de campo sensivel (senha, token) e registrada sem os valores. Antes, ignorar o campo fazia a troca de senha sumir do historico.
 - Falha ao gravar o log nao derruba mais a requisicao (o log roda depois do commit): vira log de erro e chama `error_handler`. `raise_errors = true` faz o erro subir (util em teste).

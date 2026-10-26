@@ -1,811 +1,290 @@
-# AuditLogger
+# audit_log_rails
 
-`AuditLogger` e uma gem Rails para auditar alteracoes em models ActiveRecord com:
+[![Gem Version](https://badge.fury.io/rb/audit_log_rails.svg)](https://rubygems.org/gems/audit_log_rails)
 
-- tabela propria de auditoria
-- integracao simples por `auditable`
-- payload bruto e payload humanizado
-- configuracao global por initializer
-- override por model
+Auditoria de models ActiveRecord para Rails: registra quem criou, alterou ou excluiu cada registro, quando e o que mudou (valor antigo e valor novo), numa tabela própria, com uma versão já traduzida para exibir na tela.
+
+```ruby
+class Contrato < ApplicationRecord
+  auditable owner: :pessoa
+end
+
+contrato.update!(cargo: assessor)
+contrato.audit_logs.last.audited_changes_humanize
+# => { "type" => "update",
+#      "fields" => { "cargo_id" => { "label" => "Cargo", "old_value" => 3, "new_value" => 7,
+#                                    "old_value_label" => "PROFESSOR", "new_value_label" => "ASSESSOR" } } }
+```
+
+## Sumário
+
+- [Recursos](#recursos)
+- [Compatibilidade](#compatibilidade)
+- [Instalação](#instalação)
+- [Configuração](#configuração)
+- [Quem fez a alteração (contexto do ator)](#quem-fez-a-alteração-contexto-do-ator)
+- [Auditando uma model](#auditando-uma-model)
+- [Consultando os logs](#consultando-os-logs)
+- [Campos sensíveis](#campos-sensíveis)
+- [Histórico de um agregado (dono)](#histórico-de-um-agregado-dono)
+- [Rótulo de associações](#rótulo-de-associações)
+- [Eventos manuais](#eventos-manuais)
+- [Falhas não derrubam a requisição](#falhas-não-derrubam-a-requisição)
+- [Formato dos dados](#formato-dos-dados)
+- [Tradução dos campos (I18n)](#tradução-dos-campos-i18n)
+- [Atualizando da 0.1.x](#atualizando-da-01x)
+- [Limitações e cuidados](#limitações-e-cuidados)
+- [Desenvolvimento](#desenvolvimento)
+
+## Recursos
+
+- **`auditable` na model:** registra `create`, `update` e `destroy` depois do commit. Se houver rollback, nada é gravado.
+- **Só o que mudou:** em `update`, guarda apenas os campos alterados, com `old_value` e `new_value`.
+- **Dois formatos:** o bruto (`audited_changes`) e o humanizado (`audited_changes_humanize`), com o nome traduzido de cada campo.
+- **Campos sensíveis mascarados:** a troca de senha ou token fica registrada, sem os valores.
+- **Rótulo de associações:** em `belongs_to`, o humanizado traz o nome do registro ("PROFESSOR → ASSESSOR"), e não só o id.
+- **Dono do registro:** junta num só histórico a pessoa, os contratos e os dependentes dela.
+- **Eventos manuais:** para o que não passa por callback, como login, pedido de reset de senha e `update_all`.
+- **Falha segura:** se gravar o log falhar, a requisição do usuário não quebra.
+- **Contexto do ator:** usuário, tipo, metadados, IP e um uuid que agrupa as alterações da mesma requisição.
 
 ## Compatibilidade
 
-No estado atual da gem, as versoes suportadas sao:
+| | Versão |
+|---|---|
+| Ruby | `>= 3.1` |
+| Rails / ActiveRecord | `>= 7.0` e `< 9.0` |
+| Banco | PostgreSQL (a migration usa `jsonb`). Em outros bancos, troque as colunas JSON por `text`: a gem serializa sozinha. |
 
-- Ruby `>= 3.1.0`
-- Rails / ActiveRecord `>= 7.0` e `< 9.0`
+A gem se chama `audit_log_rails`, mas o namespace Ruby é `AuditLogger`.
 
-Em outras palavras, a gem foi preparada para funcionar com projetos Rails 7 e Rails 8, desde que a versao do Ruby seja compativel.
+## Instalação
 
-## Visao Geral
+1. Adicione a gem ao `Gemfile` e instale:
 
-Ao adicionar `auditable` em uma model, a gem registra eventos de:
+   ```ruby
+   gem "audit_log_rails"
+   ```
 
-- `create`
-- `update`
-- `destroy`
+   ```bash
+   bundle install
+   ```
 
-Os registros sao persistidos na tabela `audit_logs` com:
+2. Gere a migration e o initializer:
 
-- identificacao da model auditada
-- tipo da acao
-- uuid de correlacao
-- dados do ator que executou a acao
-- payload bruto da alteracao
-- payload humanizado para exibicao
+   ```bash
+   bin/rails generate audit_logger:install
+   ```
 
-## Instalacao Passo A Passo
+   O comando cria:
+   - `db/migrate/<timestamp>_create_audit_logs.rb`: a tabela `audit_logs`;
+   - `config/initializers/audit_logger.rb`: a configuração, com os exemplos comentados.
 
-Se esta for a primeira vez que voce vai usar a gem, siga exatamente esta ordem.
+3. Rode a migration:
 
-### Passo 1 - Adicionar a gem no projeto Rails
+   ```bash
+   bin/rails db:migrate
+   ```
 
-No `Gemfile` da aplicacao cliente, adicione:
+4. Ajuste o initializer para o seu app: quem é o usuário atual, o IP e assim por diante. Veja [Configuração](#configuração).
 
-```ruby
-gem "audit_log_rails"
-```
+5. Coloque `auditable` nas models que quiser auditar.
 
-Observacao importante:
+### A tabela `audit_logs`
 
-- o nome publicado da gem e `audit_log_rails`
-- o namespace Ruby continua sendo `AuditLogger`
-- por isso, no `Gemfile` voce instala `audit_log_rails`, mas no codigo continua usando `AuditLogger`
+| Coluna | Conteúdo |
+|---|---|
+| `model_class_name` | Classe auditada, ex.: `Contrato` |
+| `id_object` | Id do registro auditado (texto) |
+| `action` | `create`, `update`, `destroy` ou o nome do evento manual |
+| `uuid` | Agrupa os logs da mesma requisição ou fluxo |
+| `changed_by_id` / `changed_by_type` | Quem fez a alteração |
+| `changed_by_other` | JSON livre com metadados do ator (nome, e-mail, request id...) |
+| `audited_changes` | Payload bruto |
+| `audited_changes_humanize` | Payload humanizado |
+| `ip_remote` | IP de origem |
+| `owner_type` / `owner_id` | Registro "dono" do log (desde a 0.2.0) |
+| `created_at`, `updated_at`, `deleted_at` | Datas |
 
-Depois rode:
+A migration também cria os índices de consulta: por model e id, uuid, ação, ator, dono e data.
 
-```bash
-bundle install
-```
+## Configuração
 
-### Passo 2 - Gerar os arquivos iniciais da gem
-
-Depois que a gem estiver instalada, rode:
-
-```bash
-bin/rails generate audit_logger:install
-```
-
-Esse comando e importante porque ele cria automaticamente os arquivos base que o projeto precisa para comecar.
-
-### Passo 3 - Entender o que a gem criou
-
-Ao rodar `bin/rails generate audit_logger:install`, a gem cria:
-
-- `db/migrate/..._create_audit_logs.rb`
-- `config/initializers/audit_logger.rb`
-
-Ou seja:
-
-- voce **nao precisa criar manualmente** o initializer da gem do zero
-- voce **nao precisa escrever manualmente** a migration base do zero
-- a gem ja entrega esses arquivos como ponto de partida
-
-### Passo 4 - Rodar a migration
-
-Depois que os arquivos forem gerados, rode:
-
-```bash
-bin/rails db:migrate
-```
-
-Esse comando cria a tabela `audit_logs` no banco da aplicacao.
-
-### Passo 5 - Ajustar o initializer ao seu projeto
-
-Depois que o arquivo `config/initializers/audit_logger.rb` for criado, voce deve abrir esse arquivo e adaptar os resolvers para a realidade do seu sistema.
-
-Em outras palavras:
-
-- a gem cria o arquivo para voce
-- mas voce precisa ajustar o conteudo conforme seu `Current.user`, `Current.request`, sessao, perfis, tenants e assim por diante
-
-## O Que O Generator Cria Na Pratica
-
-### Migration
-
-A migration criada pela gem prepara a tabela `audit_logs`, onde os registros de auditoria serao persistidos.
-
-### Initializer
-
-O initializer criado pela gem e o lugar onde voce diz:
-
-- quem e o usuario atual
-- qual id deve ser salvo em `changed_by_id`
-- qual tipo deve ser salvo em `changed_by_type`
-- quais metadados vao para `changed_by_other`
-- como o `uuid` sera resolvido
-- como o IP sera obtido
-- quais atributos devem ser ignorados
-- como a humanizacao deve funcionar
-
-## Estrutura Da Tabela
-
-A migration inicial cria a tabela `audit_logs` com os campos:
-
-- `model_class_name`
-- `id_object`
-- `action`
-- `uuid`
-- `changed_by_id`
-- `changed_by_type`
-- `changed_by_other`
-- `audited_changes`
-- `audited_changes_humanize`
-- `ip_remote`
-- `owner_type` e `owner_id` (registro "dono", desde a 0.2.0)
-- `created_at`
-- `updated_at`
-- `deleted_at`
-
-Quem instalou a 0.1.x cria as colunas de dono com:
-
-```bash
-bin/rails generate audit_logger:upgrade
-bin/rails db:migrate
-```
-
-Sem essas colunas a gem continua funcionando; so nao grava o dono.
-
-## Configuracao Global Explicada
-
-Depois de rodar o generator, a gem cria automaticamente o arquivo:
-
-```text
-config/initializers/audit_logger.rb
-```
-
-Voce nao precisa criar esse arquivo manualmente do zero.
-
-O papel desse arquivo e ensinar a gem a descobrir informacoes do seu sistema.
-
-Importante:
-
-- esse arquivo e criado automaticamente pela gem quando voce roda o generator
-- os exemplos relacionados a `Current.user`, `Current.request` e `Current.audit_uuid` sao apenas sugestoes
-- voce precisa descomentar e adaptar somente o que fizer sentido no seu projeto
-
-Se o seu sistema usa outro contexto, por exemplo `Current.admin`, `Current.account`, `session[:jwt]` ou qualquer outro objeto, basta trocar nos resolvers.
-
-Exemplo do initializer:
+Tudo fica em `config/initializers/audit_logger.rb`:
 
 ```ruby
 AuditLogger.configure do |config|
-  # Descomente apenas o que fizer sentido no seu projeto.
-  # A gem nao tem como adivinhar sozinha onde voce guarda usuario logado,
-  # request, tenant, sessao ou token.
+  # Quem fez a alteração.
+  config.changed_by_id_resolver = -> { Current.user&.id }
+  config.changed_by_type_resolver = -> { Current.user&.class&.name }
+  config.changed_by_other_resolver = -> { { nome: Current.user&.nome, request_id: Current.request_id }.compact }
 
-  # config.changed_by_id_resolver = -> { Current.user&.id }
-  # config.changed_by_type_resolver = -> { Current.user&.class&.name }
-  #
-  # config.changed_by_other_resolver = lambda do
-  #   {
-  #     name: Current.user&.name,
-  #     email: Current.user&.email,
-  #     request_id: Current.request_id
-  #   }.compact
-  # end
-  #
-  # config.uuid_resolver = -> { Current.audit_uuid }
-  # config.ip_resolver = -> { Current.request&.remote_ip }
+  # Agrupamento e origem.
+  config.uuid_resolver = -> { Current.request_id }
+  config.ip_resolver = -> { Current.ip }
 
-  # humanize serve para utilizar traduções do i18n de forma que os attributes do model seja traduzidos humanizando a leitura.
+  # O que entra no log.
+  config.ignored_attributes = %i[created_at updated_at lock_version]
+  config.masked_attributes += %i[token_api]
+  config.mask_value = "[FILTRADO]"
+
+  # Humanização.
   config.humanize_by_default = true
-
-  # Configura o padrão do scope do i18n para a humanização dos atributos do model.
   config.i18n_scopes = ["activerecord.attributes", "attributes"]
+  config.resolve_associations = true
+  config.humanizer = nil
 
-  # Atributos que devem ser ignorados na auditoria.
-  # Por exemplo, `created_at`, `updated_at`, `lock_version` e outros campos de auditoria.
-  config.ignored_attributes = [:created_at, :updated_at, :lock_version]
-  
-  # Configura a humanização dos atributos do model.
-  config.humanizer = ->(_model_klass, _attribute, _old_value, _new_value) { nil }
+  # Falhas.
+  config.raise_errors = Rails.env.test?
+  config.error_handler = ->(error, record, action) { Rails.error.report(error, context: { action: action, record: record&.class&.name }) }
 end
 ```
 
-### O Que Esse Arquivo Faz
+| Opção | Padrão | O que faz |
+|---|---|---|
+| `changed_by_id_resolver` | `nil` | Valor gravado em `changed_by_id` |
+| `changed_by_type_resolver` | `nil` | Valor gravado em `changed_by_type` (classe, perfil, papel...) |
+| `changed_by_other_resolver` | `-> { {} }` | Hash gravado em `changed_by_other` |
+| `uuid_resolver` | `nil` | Uuid de correlação; sem valor, a gem gera um por log |
+| `ip_resolver` | `nil` | Valor gravado em `ip_remote` |
+| `ignored_attributes` | `created_at`, `updated_at`, `lock_version` | Campos que nunca entram no log |
+| `masked_attributes` | `password`, `password_digest`, `encrypted_password`, `reset_password_token`, `confirmation_token`, `unlock_token` | Campos registrados sem o valor ([Campos sensíveis](#campos-sensíveis)) |
+| `mask_value` | `"[FILTRADO]"` | Texto que substitui o valor mascarado |
+| `humanize_by_default` | `true` | Gera o `audited_changes_humanize` |
+| `i18n_scopes` | `["activerecord.attributes", "attributes"]` | Onde procurar a tradução dos campos |
+| `resolve_associations` | `true` | Rótulo do registro em `belongs_to` ([Rótulo de associações](#rótulo-de-associações)) |
+| `humanizer` | `nil` | Humanização personalizada ([Tradução dos campos](#tradução-dos-campos-i18n)) |
+| `raise_errors` | `false` | Deixa o erro de gravação do log subir (útil em teste) |
+| `error_handler` | `nil` | `->(error, record, action)` chamado quando gravar o log falha |
 
-Esse bloco:
+Todo resolver é um lambda. Se um resolver lançar erro, a gem registra um aviso e grava o campo vazio; o log não se perde por isso. Uma configuração inválida, como um valor que não é lambda, gera `AuditLogger::ConfigurationError` na subida do app.
 
-```ruby
-AuditLogger.configure do |config|
-  ...
-end
-```
+## Quem fez a alteração (contexto do ator)
 
-serve para configurar o comportamento global da gem no projeto inteiro.
-
-Tudo que estiver aqui vira o comportamento padrao da auditoria, a menos que uma model sobrescreva algo localmente.
-
-### Explicando Cada Configuracao
-
-#### `config.changed_by_id_resolver`
-
-Exemplo:
-
-```ruby
-config.changed_by_id_resolver = -> { Current.user&.id }
-```
-
-Esse resolver diz para a gem qual valor deve ser salvo na coluna `changed_by_id`.
-
-Na pratica:
-
-- se o usuario logado for `Current.user`
-- a gem vai salvar `Current.user.id`
-
-Se no seu sistema o ator principal for outro, voce troca aqui.
-
-Exemplo:
+A gem não sabe sozinha quem está logado. O jeito mais comum é usar `ActiveSupport::CurrentAttributes`:
 
 ```ruby
-config.changed_by_id_resolver = -> { Current.admin&.id }
-```
-
-#### `config.changed_by_type_resolver`
-
-Exemplo:
-
-```ruby
-config.changed_by_type_resolver = -> { Current.user&.class&.name }
-```
-
-Esse resolver diz qual valor sera salvo em `changed_by_type`.
-
-Voce pode usar isso para salvar:
-
-- nome da classe
-- perfil
-- role
-- tipo de usuario
-
-Exemplo:
-
-```ruby
-config.changed_by_type_resolver = -> { Current.user&.profile }
-```
-
-#### `config.changed_by_other_resolver`
-
-Exemplo:
-
-```ruby
-config.changed_by_other_resolver = lambda do
-  {
-    name: Current.user&.name,
-    email: Current.user&.email,
-    request_id: Current.request_id
-  }.compact
-end
-```
-
-Esse resolver preenche o campo `changed_by_other`, que e um JSON livre.
-
-Use esse campo quando quiser guardar metadados extras, por exemplo:
-
-- nome do usuario
-- email
-- request id
-- tenant
-- school_id
-- url
-- user_agent
-
-Esse campo existe justamente para voce nao ficar preso so a `changed_by_id` e `changed_by_type`.
-
-#### `config.uuid_resolver`
-
-Exemplo:
-
-```ruby
-config.uuid_resolver = -> { Current.audit_uuid }
-```
-
-Esse resolver define o `uuid` do log.
-
-Esse `uuid` e util para correlacionar varios logs da mesma sessao ou do mesmo fluxo.
-
-Se esse resolver nao retornar valor, a gem gera um UUID automaticamente.
-
-#### `config.ip_resolver`
-
-Exemplo:
-
-```ruby
-config.ip_resolver = -> { Current.request&.remote_ip }
-```
-
-Esse resolver informa qual IP deve ser salvo em `ip_remote`.
-
-Se voce nao quiser salvar IP, pode deixar `nil`.
-
-#### `config.humanize_by_default`
-
-Exemplo:
-
-```ruby
-config.humanize_by_default = true
-```
-
-Se estiver `true`, a gem tenta gerar `audited_changes_humanize` por padrao.
-
-Se estiver `false`, a gem continua gravando o payload bruto, mas nao humaniza automaticamente.
-
-#### `config.i18n_scopes`
-
-Exemplo:
-
-```ruby
-config.i18n_scopes = ["activerecord.attributes", "attributes"]
-```
-
-Esses sao os escopos que a gem usa para tentar traduzir o nome dos atributos.
-
-Por exemplo, ao auditar `Student.status`, a gem tenta procurar traducoes nesses caminhos.
-
-#### `config.ignored_attributes`
-
-Exemplo:
-
-```ruby
-config.ignored_attributes = [:created_at, :updated_at, :lock_version]
-```
-
-Aqui voce informa quais atributos nao devem entrar na auditoria por padrao.
-
-Isso e util para evitar ruido.
-
-#### `config.humanizer`
-
-Exemplo:
-
-```ruby
-config.humanizer = ->(_model_klass, _attribute, _old_value, _new_value) { nil }
-```
-
-Esse e um humanizer global opcional.
-
-Ele existe para casos em que voce quer controlar manualmente como um campo sera apresentado.
-
-Importante:
-
-- se ele retornar `nil`, a gem usa o fallback padrao com I18n
-- se ele retornar um `Hash`, esse hash e usado para montar o payload humanizado
-- se ele retornar um valor simples, a gem usa esse valor como representacao humanizada
-
-## Exemplo Real Com `Current`
-
-Uma forma comum de integrar a gem no app cliente e usar `CurrentAttributes`.
-
-Se o seu projeto ainda nao tiver um `Current`, voce pode criar algo assim:
-
-```ruby
+# app/models/current.rb
 class Current < ActiveSupport::CurrentAttributes
-  attribute :user, :request, :audit_uuid, :request_id
+  attribute :user, :request_id, :ip
 end
 ```
 
-Esse objeto serve como um lugar central para guardar o contexto atual da requisicao.
-
-Depois, no controller base da aplicacao, voce pode preencher esses dados:
-
 ```ruby
-class ApplicationController < ActionController::Base
-  before_action :store_current_context
-
-  private
-
-  def store_current_context
-    Current.user = current_user
-    Current.request = request
+# app/controllers/application_controller.rb
+class ApplicationController < ActionController::Base # ou ActionController::API
+  before_action do
+    Current.user = current_user # na API com JWT, o usuário que o token identificou
     Current.request_id = request.request_id
-    Current.audit_uuid ||= session[:audit_uuid] ||= SecureRandom.uuid
+    Current.ip = request.remote_ip
   end
 end
 ```
 
-O objetivo desse passo e simples:
+Com `uuid_resolver = -> { Current.request_id }`, todos os logs de uma mesma requisição ficam com o mesmo uuid. Por exemplo, salvar a pessoa e os contratos dela num formulário só.
 
-- deixar `Current.user` disponivel para a gem
-- deixar `Current.request` disponivel para a gem
-- manter um `audit_uuid` estavel dentro da sessao
+Fora de requisição (jobs, rake, console), não há `Current.user`. O log é gravado com o ator vazio. Se quiser identificar a origem, preencha o `Current` no job.
 
-Se o seu sistema ja tiver outra estrategia para isso, nao precisa copiar exatamente esse exemplo.
-
-## Ativando A Auditoria Na Model
-
-Depois da instalacao e da configuracao global, voce ativa a auditoria na model com `auditable`.
-
-Exemplo:
+## Auditando uma model
 
 ```ruby
-class Student < ApplicationRecord
+class Pessoa < ApplicationRecord
   auditable
 end
 ```
 
-So isso ja faz a gem registrar:
+Opções, todas opcionais e válidas só para a model:
 
-- criacao
-- atualizacao
-- remocao
-
-## Consultando Os Logs Da Model
-
-Ao usar `auditable`, a gem tambem define automaticamente a associacao:
-
-```ruby
-student.audit_logs
-```
-
-Ou seja, voce nao precisa criar manualmente um `has_many :audit_logs` basico para comecar.
-
-Exemplo:
+| Opção | Exemplo | O que faz |
+|---|---|---|
+| `ignored_attributes` | `[:sincronizado_em]` | Soma aos ignorados globais |
+| `masked_attributes` | `[:token_generate]` | Soma aos mascarados globais |
+| `owner` | `:pessoa` ou `->(r) { r.contrato&.pessoa }` | Registro dono do log ([Histórico de um agregado](#histórico-de-um-agregado-dono)) |
+| `humanize` | `false` | Liga ou desliga a humanização nesta model |
+| `i18n_scopes` | `["meu_app.campos", "activerecord.attributes"]` | Escopos de tradução próprios |
+| `humanizer` | `->(klass, campo, antigo, novo) { ... }` | Humanização própria da model |
 
 ```ruby
-student = Student.find(1)
-student.audit_logs
-```
-
-Essa associacao ja filtra:
-
-- `model_class_name`
-- `id_object`
-
-Assim, cada model passa a enxergar apenas os logs que pertencem a ela.
-
-### Exemplo Pratico
-
-```ruby
-student = Student.create!(name: "Joao")
-
-student.update!(name: "Maria")
-
-student.audit_logs.count
-# => 2
-```
-
-### Como A Associacao Funciona
-
-A gem grava na tabela:
-
-- `model_class_name`: nome da classe auditada, por exemplo `Student`
-- `id_object`: id do registro auditado, salvo como string
-
-Com isso, a associacao consegue ligar corretamente:
-
-- a model atual
-- ao id correto do objeto auditado
-
-Se no futuro voce quiser um nome diferente para a associacao ou um escopo proprio, ainda pode sobrescrever isso manualmente no projeto cliente.
-
-## Preciso Criar Uma Model No Projeto Cliente?
-
-Para o uso basico, nao.
-
-A gem ja fornece a model:
-
-```ruby
-AuditLogger::AuditLog
-```
-
-Entao, para comecar, voce pode usar:
-
-- `self.audit_logs`
-- `student.audit_logs`
-- `AuditLogger::AuditLog.all`
-
-## Uso Simples Com O Proprio Objeto
-
-Se voce ja tem o objeto em maos e quer acessar os logs dele, o jeito mais simples e:
-
-```ruby
-self.audit_logs
-```
-
-Exemplo:
-
-```ruby
-student = Student.find(1)
-
-student.audit_logs
-student.audit_logs.where(action: "update")
-student.audit_logs.order(created_at: :desc)
-```
-
-Esse e o caminho ideal quando voce quer:
-
-- mostrar historico dentro da tela do proprio registro
-- montar uma aba de auditoria no detalhe do objeto
-- buscar apenas os logs daquele registro especifico
-
-## Uso Avancado Para Relatorios, Rota E Ransack
-
-Se voce quiser montar:
-
-- relatorios gerais
-- controllers e rotas proprias
-- filtros com `ransack`
-- telas administrativas
-- scopes personalizados
-
-ai vale a pena criar uma model no projeto cliente como wrapper da model da gem.
-
-Exemplo:
-
-```ruby
-class AuditLog < AuditLogger::AuditLog
-end
-```
-
-Isso nao substitui a model da gem.
-Isso apenas cria um ponto de entrada mais natural dentro da sua aplicacao.
-
-### Exemplo Com Scopes
-
-```ruby
-class AuditLog < AuditLogger::AuditLog
-  scope :recent, -> { order(created_at: :desc) }
-  scope :from_model, ->(model_name) { where(model_class_name: model_name) }
-end
-```
-
-### Exemplo De Controller
-
-```ruby
-class AuditLogsController < ApplicationController
-  def index
-    @q = AuditLog.ransack(params[:q])
-    @audit_logs = @q.result.order(created_at: :desc)
-  end
-end
-```
-
-### Exemplo De Rotas
-
-```ruby
-Rails.application.routes.draw do
-  resources :audit_logs, only: [:index, :show]
-end
-```
-
-### Exemplo De Consulta Geral
-
-```ruby
-AuditLog.where(model_class_name: "Student")
-AuditLog.where(action: "update")
-AuditLog.order(created_at: :desc)
-```
-
-## Regra Pratica
-
-Se a necessidade for:
-
-- historico do proprio registro: use `self.audit_logs`
-- relatorio geral do sistema: use `AuditLogger::AuditLog`
-- tela administrativa, filtro, `ransack`, rota propria: crie `AuditLog < AuditLogger::AuditLog`
-
-## Sobrescrevendo Configuracao Em Uma Model
-
-Se uma model precisar de comportamento diferente do padrao global, voce pode sobrescrever localmente.
-
-Exemplo:
-
-```ruby
-class Student < ApplicationRecord
-  auditable \
-    humanize: true,
-    i18n_scopes: ["school.student", "activerecord.attributes"],
-    ignored_attributes: [:updated_at],
-    humanizer: ->(_model_klass, attribute, old_value, new_value) do
-      {
-        label: "Campo #{attribute}",
-        old_value: old_value,
-        new_value: new_value
-      }
-    end
-end
-```
-
-Nesse caso:
-
-- a model usa `i18n_scopes` proprios
-- ignora `updated_at` localmente
-- pode ter um humanizer proprio so dela
-
-## Como A Auditoria Funciona
-
-A gem usa callbacks de commit:
-
-- `after_create_commit`
-- `after_update_commit`
-- `after_destroy_commit`
-
-Isso significa que o log so e gravado quando a transacao foi confirmada com sucesso.
-Se houver rollback, a auditoria nao e persistida.
-
-## Contrato Do Payload Bruto
-
-### Create
-
-Em `create`, a gem grava um snapshot completo dos atributos auditaveis:
-
-```json
-{
-  "type": "create",
-  "fields": {
-    "name": {
-      "value": "Joao"
-    },
-    "status": {
-      "value": "active"
-    }
-  }
-}
-```
-
-### Update
-
-Em `update`, a gem grava apenas os campos alterados:
-
-```json
-{
-  "type": "update",
-  "fields": {
-    "status": {
-      "old_value": "active",
-      "new_value": "inactive"
-    }
-  }
-}
-```
-
-### Destroy
-
-Em `destroy`, a gem grava um snapshot antes da remocao:
-
-```json
-{
-  "type": "destroy",
-  "fields": {
-    "name": {
-      "value": "Joao"
-    },
-    "status": {
-      "value": "inactive"
-    }
-  }
-}
-```
-
-## Contrato Do Payload Humanizado
-
-O campo `audited_changes_humanize` segue a mesma estrutura do payload bruto, mas adiciona labels amigaveis:
-
-```json
-{
-  "type": "update",
-  "fields": {
-    "status": {
-      "label": "Situacao",
-      "old_value": "active",
-      "new_value": "inactive"
-    }
-  }
-}
-```
-
-## Humanizacao Com I18n
-
-Por padrao, a gem tenta buscar labels nesta ordem:
-
-1. `activerecord.attributes.<model>.<attribute>`
-2. `attributes.<attribute>`
-3. fallback para `attribute.humanize`
-
-Exemplo:
-
-```yml
-pt-BR:
-  activerecord:
-    attributes:
-      student:
-        name: "Nome"
-        status: "Situacao"
-  attributes:
-    status: "Status"
-```
-
-## Metadados Extras Do Ator
-
-O campo `changed_by_other` foi pensado para guardar metadados livres do ator e da requisicao, por exemplo:
-
-```ruby
-config.changed_by_other_resolver = lambda do
-  {
-    name: Current.user&.name,
-    email: Current.user&.email,
-    url: Current.request&.original_url,
-    user_agent: Current.request&.user_agent,
-    school_id: Current.school&.id
-  }.compact
-end
-```
-
-## Defaults Atuais Da Gem
-
-Se voce nao configurar nada, a gem usa:
-
-- `changed_by_other_resolver = -> { {} }`
-- `humanize_by_default = true`
-- `i18n_scopes = ["activerecord.attributes", "attributes"]`
-- `ignored_attributes = [:created_at, :updated_at, :lock_version]`
-- `masked_attributes = [:password, :password_digest, :encrypted_password, :reset_password_token, :confirmation_token, :unlock_token]`
-- `mask_value = "[FILTRADO]"`
-- `resolve_associations = true`
-- `raise_errors = false`
-- `error_handler = nil`
-
-Se `uuid_resolver` nao retornar valor, a gem gera um UUID automaticamente.
-
-## Campos Sensiveis (Mascarados)
-
-Ignorar a senha (`ignored_attributes`) faz a troca de senha sumir do historico. Mascarar registra que o campo mudou, sem os valores:
-
-```ruby
-# global (initializer)
-config.masked_attributes += [:token_api]
-
-# por model
 class User < ApplicationRecord
-  auditable masked_attributes: [:token_generate]
+  auditable masked_attributes: [:token_generate], ignored_attributes: [:last_sign_in_at]
 end
 ```
 
-No payload, `old_value` e `new_value` viram `"[FILTRADO]"`. Valor nulo continua nulo, para mostrar que o campo estava vazio.
-
-## Falhas Nao Derrubam A Requisicao
-
-O log e gravado depois do commit. Se a gravacao do log falhar, a gem registra o erro (`Rails.logger.error`), chama o `error_handler` (se houver) e segue: o dado do usuario ja foi salvo e a requisicao nao vira erro 500.
+## Consultando os logs
 
 ```ruby
-config.error_handler = ->(error, record, action) { Sentry.capture_exception(error) }
-config.raise_errors = Rails.env.test? # nos testes, o erro sobe
+pessoa.audit_logs                                  # logs do próprio registro
+pessoa.audit_logs.where(action: "update").order(created_at: :desc)
+
+AuditLogger::AuditLog.of_owner(pessoa)             # pessoa + registros que têm ela como dona
+AuditLogger::AuditLog.where(model_class_name: "Contrato", action: "destroy")
+AuditLogger::AuditLog.where(changed_by_id: user.id)
 ```
 
-## Historico De Um Agregado (Dono)
-
-Cada log guarda um registro "dono". Sem configuracao, o dono e o proprio registro. Para juntar o historico de varias models num registro so (ex.: a pessoa, os contratos e os dependentes dela):
+Para telas administrativas, filtros com Ransack ou scopes próprios, crie uma model no app que herda da model da gem:
 
 ```ruby
+class AuditLog < AuditLogger::AuditLog
+  scope :recentes, -> { order(created_at: :desc) }
+
+  def self.ransackable_attributes(_auth = nil) = %w[model_class_name action changed_by_id created_at]
+end
+```
+
+## Campos sensíveis
+
+Pôr a senha em `ignored_attributes` faz a troca de senha sumir do histórico. Em `masked_attributes`, a alteração aparece, mas sem os valores:
+
+```json
+{ "type": "update", "fields": { "encrypted_password": { "old_value": "[FILTRADO]", "new_value": "[FILTRADO]" } } }
+```
+
+- O valor nulo continua nulo, para mostrar que o campo estava vazio.
+- No `create`, um campo mascarado preenchido aparece como `"[FILTRADO]"`.
+- Se um campo estiver nos ignorados e nos mascarados ao mesmo tempo, vale o ignorado.
+
+## Histórico de um agregado (dono)
+
+Cada log guarda um registro "dono" (`owner_type`/`owner_id`). Sem configuração, o dono é o próprio registro. Para juntar o histórico de várias models num lugar só:
+
+```ruby
+class Pessoa < ApplicationRecord
+  auditable                                          # dona de si mesma
+end
+
 class Contrato < ApplicationRecord
   belongs_to :pessoa
-  auditable owner: :pessoa
+  auditable owner: :pessoa                           # associação
 end
 
 class Dependente < ApplicationRecord
-  auditable owner: ->(dependente) { dependente.contrato&.pessoa }
+  belongs_to :contrato
+  auditable owner: ->(dependente) { dependente.contrato&.pessoa }   # caminho mais longo
 end
 
-AuditLogger::AuditLog.of_owner(pessoa) # pessoa + contratos + dependentes, do mais recente ao mais antigo
+AuditLogger::AuditLog.of_owner(pessoa) # tudo da pessoa, do mais recente ao mais antigo
 ```
 
-## Rotulo De Associacoes
+Se a associação do dono estiver vazia, o dono passa a ser o próprio registro. Com STI, o `owner_type` é a classe base.
 
-Com `resolve_associations = true`, a troca de um `belongs_to` traz no payload humanizado o rotulo do registro associado:
+## Rótulo de associações
+
+Com `resolve_associations = true`, a troca de um `belongs_to` ganha no formato humanizado o nome do registro antigo e do novo:
 
 ```json
 { "label": "Cargo", "old_value": 3, "new_value": 7, "old_value_label": "PROFESSOR", "new_value_label": "ASSESSOR" }
 ```
 
-O rotulo vem do `to_s` definido na model associada ou, na falta dele, de `display_name`, `descricao`, `nome`, `name` ou `title`. Registros com soft delete (`with_deleted`) tambem sao encontrados.
+No `create` e no `destroy`, o rótulo vai em `value_label`. Ele vem do `to_s` definido na model associada; se ela não tiver um, de `display_name`, `descricao`, `nome`, `name` ou `title`. A busca inclui registros excluídos por soft delete (`with_deleted`), porque o histórico precisa do nome antigo.
 
-## Eventos Manuais
+Cada rótulo custa uma consulta ao banco. Em tabelas com muitas associações e muita escrita, avalie desligar a opção na model (`humanize: false`) ou no global.
 
-Para o que nao passa pelos callbacks (`update_all`, pedido de reset de senha, login):
+## Eventos manuais
+
+O que não passa pelos callbacks da model é registrado com `AuditLogger.record_event`. É o caso do `update_all`, do login e do pedido de reset de senha.
 
 ```ruby
+# Com um registro: usa a humanização e o dono da model dele.
 AuditLogger.record_event(
   action: "password_reset_requested",
   record: user,
@@ -813,48 +292,127 @@ AuditLogger.record_event(
   metadata: { origem: "esqueci_minha_senha" }
 )
 
+# Sem registro (ex.: login de CPF que não existe).
 AuditLogger.record_event(action: "login_failed", model_class_name: "User", id_object: cpf, metadata: { motivo: "senha" })
+
+# Alteração em massa, com dono explícito.
+ids = perfil.users.where(id: user_ids).pluck(:id)
+perfil.users.where(id: ids).update_all(g_perfil_id: nil)
+AuditLogger.record_event(action: "usuarios_desvinculados", record: perfil, metadata: { user_ids: ids })
 ```
 
-Como no log automatico, uma falha aqui nunca sobe (a nao ser com `raise_errors`).
+| Parâmetro | Obrigatório | Conteúdo |
+|---|---|---|
+| `action` | sim | Nome do evento |
+| `record` | não | Registro relacionado; define model, id e dono |
+| `model_class_name`, `id_object` | não | Usados quando não há `record` |
+| `owner` | não | Dono explícito (sobrepõe o da model) |
+| `fields` | não | Mesmo formato do log automático |
+| `metadata` | não | Hash livre, gravado em `audited_changes["metadata"]` |
 
-## Limitacoes Atuais
+## Falhas não derrubam a requisição
 
-- a migration usa `jsonb`, entao o uso esperado em producao e com PostgreSQL
-- nos testes da gem, esses campos foram simulados com `text` em SQLite em memoria
-- `url` e `user_agent` ainda nao possuem colunas proprias; hoje o recomendado e armazenar isso em `changed_by_other`
+O log é gravado depois do commit, quando o dado do usuário já foi salvo. Se a gravação do log falhar (banco fora, JSON inválido, erro no humanizer), a gem:
+
+1. registra o erro com `Rails.logger.error`;
+2. chama o `error_handler`, se houver;
+3. segue sem lançar exceção. A requisição não vira erro 500.
+
+Em teste, use `config.raise_errors = true` para o erro aparecer.
+
+## Formato dos dados
+
+`audited_changes` (bruto) e `audited_changes_humanize` (humanizado) têm a mesma estrutura:
+
+```jsonc
+// create e destroy: retrato completo
+{ "type": "create", "fields": { "nome": { "value": "Ana" }, "cargo_id": { "value": 3 } } }
+
+// update: só o que mudou
+{ "type": "update", "fields": { "nome": { "old_value": "Ana", "new_value": "Ana Maria" } } }
+
+// evento manual
+{ "type": "login_failed", "fields": {}, "metadata": { "motivo": "senha" } }
+```
+
+O humanizado acrescenta em cada campo:
+- `label`: o nome traduzido;
+- `old_value_label`, `new_value_label` ou `value_label`: o rótulo, nos campos de `belongs_to`.
+
+## Tradução dos campos (I18n)
+
+O `label` é procurado nesta ordem, para cada escopo de `i18n_scopes`:
+
+1. `<escopo>.<model>.<campo>`, ex.: `activerecord.attributes.pessoa.nome`;
+2. `<escopo>.<campo>`, ex.: `attributes.nome`.
+
+Se não achar nada, usa `campo.humanize`.
+
+```yaml
+pt-BR:
+  activerecord:
+    attributes:
+      pessoa:
+        nome: "Nome"
+        cargo_id: "Cargo"
+```
+
+Para controlar a apresentação de um campo, use um `humanizer`, global ou na model. Ele pode devolver:
+- `nil`: usa a tradução padrão;
+- um `Hash`: as chaves são mescladas ao campo (ex.: `{ label:, old_value:, new_value: }`);
+- um valor simples: vira o `value` do campo.
+
+```ruby
+auditable humanizer: ->(_klass, campo, antigo, novo) do
+  next unless campo == "situacao"
+
+  { label: "Situação", old_value: SITUACOES[antigo], new_value: SITUACOES[novo] }
+end
+```
+
+Uma falha no humanizer é registrada como aviso, e o campo cai na tradução padrão.
+
+## Atualizando da 0.1.x
+
+A 0.2.0 traz as colunas `owner_type` e `owner_id`. Para criá-las:
+
+```bash
+bin/rails generate audit_logger:upgrade
+bin/rails db:migrate
+```
+
+Sem as colunas a gem continua funcionando; só não grava o dono. As demais novidades estão no [CHANGELOG](CHANGELOG.md):
+- campos mascarados;
+- falha segura;
+- rótulos de associação;
+- eventos manuais.
+
+## Limitações e cuidados
+
+- **Operações em massa não disparam callbacks.** `update_all`, `delete_all`, `insert_all`, `upsert_all` e `update_column(s)` não geram log; registre com `AuditLogger.record_event`.
+- **Soft delete:**
+  - com `paranoia`, o `destroy` dispara os callbacks de destroy, então confira no seu app se o `after_destroy_commit` é chamado;
+  - com `discard`, a exclusão é um `update` e aparece como tal, com `discarded_at` mudando.
+- **PostgreSQL:** a migration gerada usa `jsonb`. Nos testes da gem, as colunas são `text` em SQLite.
+- **`url` e `user_agent`** não têm coluna própria: guarde em `changed_by_other`.
 
 ## Desenvolvimento
 
-Depois de clonar o repositorio:
-
 ```bash
 bin/setup
-bundle install
-bundle exec rake test
+bundle exec rake test     # Minitest com SQLite em memória
+bundle exec rubocop
+bundle-audit check        # dependências com CVE
 ```
 
-## Testes
+Para publicar uma versão:
 
-A gem usa:
+1. Atualize `lib/audit_logger/version.rb` e o `CHANGELOG.md`.
+2. Rode `bundle exec rake test`.
+3. Gere o pacote com `gem build audit_logger.gemspec`.
+4. Publique com `gem push audit_log_rails-<versão>.gem` (pede login e o código de verificação do RubyGems).
+5. Crie a tag `v<versão>` no Git e envie: `git tag v<versão> && git push origin main --tags`.
 
-- `Minitest`
-- `ActiveRecord`
-- `SQLite` em memoria para a suite local
+## Licença
 
-Para rodar os testes:
-
-```bash
-bundle exec rake test
-```
-
-## Proximos Passos Sugeridos
-
-- refinar README com mais exemplos por dominio
-- adicionar testes especificos de rollback
-- documentar estrategias para soft delete
-- melhorar metadata publica da gem no `gemspec`
-
-## License
-
-The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
+Código aberto sob a [licença MIT](LICENSE.txt).
